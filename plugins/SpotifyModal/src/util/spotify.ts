@@ -26,6 +26,7 @@ export const connectedAccountsStore =
 
 export let spotifyUtils: {
   getAccessToken: (accountId: string) => Promise<HTTPResponse<{ access_token: string }>>;
+  refreshAccessToken: (type: string, accountId: string) => Promise<string>;
 };
 
 export const sendSpotifyRequest = async (
@@ -41,6 +42,8 @@ export const sendSpotifyRequest = async (
   const token =
     overrideToken || connectedAccountsStore.getAccount(accountId, 'spotify')?.accessToken;
 
+  const deviceId = store.getPlayableComputerDevices().find((c) => c.socket.accountId === accountId)
+    ?.device?.id;
   if (!token)
     return Promise.resolve(
       new Response('', { status: 500, statusText: 'accountId has no accessToken' }),
@@ -48,7 +51,10 @@ export const sendSpotifyRequest = async (
 
   persist = true;
 
-  const res = await fetch(new URL(endpoint.replace(/^\//, ''), 'https://api.spotify.com/v1/me/'), {
+  const url = new URL(endpoint.replace(/^\//, ''), 'https://api.spotify.com/v1/me/');
+  if (deviceId) url.searchParams.append('device_id', deviceId);
+
+  const res = await fetch(url, {
     ...init,
     mode: 'cors',
     headers: {
@@ -57,15 +63,16 @@ export const sendSpotifyRequest = async (
     },
   });
 
-  if (res.status === 401) {
+  if (res.status === 401 || res.status === 404) {
     if (!isRetrying) {
       logger.log('(spotify)', 'reauthing');
+      const token = await spotifyUtils.refreshAccessToken('spotify', accountId);
 
-      const token = await spotifyUtils.getAccessToken(accountId);
-
-      if (token.ok) {
+      if (token) {
+        const account = connectedAccountsStore.getAccount(accountId, 'spotify');
+        if (account) account.accessToken = token;
         logger.log('(spotify)', 'retrying', endpoint);
-        return await sendSpotifyRequest(accountId, endpoint, init, true, token.body.access_token);
+        return await sendSpotifyRequest(accountId, endpoint, init, true, token);
       }
     }
 
@@ -336,7 +343,12 @@ export const initSpotify = async (): Promise<void> => {
     Record<string, (accountId: string) => Promise<HTTPResponse<{ access_token: string }>>>
   >(webpack.filters.bySource(/\..{1,3}\.SPOTIFY,.{1,3}\)/));
 
+  const accountUtilsModule = await webpack.waitForProps<{
+    refreshAccessToken: (type: string, /* "spotify" */ accountId: string) => Promise<string>;
+  }>('refreshAccessToken');
+
   spotifyUtils = {
     getAccessToken: webpack.getFunctionBySource(spotifyUtilsModule, /\..{1,3}\.SPOTIFY,.{1,3}\)/),
+    refreshAccessToken: accountUtilsModule?.refreshAccessToken,
   };
 };
